@@ -1,0 +1,9 @@
+{
+  "id": "fanqie-drafter",
+  "name": "Fanqie Drafter",
+  "version": "0.1.0",
+  "minAppVersion": "1.4.0",
+  "description": "Send the active note (or selection) to your Fanqie writer draft box via a local batch.py CLI, with live progress. Requires the fanqie-draft-tool Playwright script.",
+  "author": "121212165",
+  "isDesktopOnly": true
+}
