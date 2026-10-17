@@ -16,6 +16,7 @@ const DEFAULT_SETTINGS = {
   novelId: "",
   headful: false,
   verify: false,
+  timeoutSec: 600, // 子进程硬超时：超时 kill 进程树（Playwright/chrome 一起），防静默挂死
 };
 
 module.exports = class FanqieDrafter extends Plugin {
@@ -76,6 +77,13 @@ module.exports = class FanqieDrafter extends Plugin {
   }
 
   send(payload) {
+    // 预检：batch.py 必须存在（同步校验，任何失败场景 toast ≤1s，不再静默丢稿）
+    if (!fs.existsSync(this.settings.scriptPath)) {
+      new Notice("❌ batch.py 路径不存在：" + this.settings.scriptPath);
+      this.app.setting.open();
+      this.app.setting.openTabById("fanqie-drafter");
+      return;
+    }
     // 导出临时 txt（batch.py 会按“第X章”等标记切章）
     this.tmpFile = path.join(os.tmpdir(), `obsidian-fanqie-${Date.now()}.txt`);
     fs.writeFileSync(this.tmpFile, payload.text, "utf8");
@@ -90,9 +98,15 @@ module.exports = class FanqieDrafter extends Plugin {
     logEl.style.cssText =
       "font-family: monospace; font-size: 12px; white-space: pre-wrap; max-height: 50vh; overflow-y: auto; background: var(--background-secondary); padding: 8px; border-radius: 6px;";
     logEl.setText("启动中…\n");
-    const closeBtn = modal.contentEl.createEl("button", { text: "关闭（后台继续）" });
-    closeBtn.style.marginTop = "8px";
+    const btnsRow = modal.contentEl.createDiv();
+    btnsRow.style.cssText = "display:flex; gap:8px; margin-top:8px;";
+    const copyBtn = btnsRow.createEl("button", { text: "复制日志" });
+    const closeBtn = btnsRow.createEl("button", { text: "关闭（后台继续）" });
     closeBtn.onclick = () => modal.close();
+    copyBtn.onclick = async () => {
+      await navigator.clipboard.writeText(logEl.textContent);
+      new Notice("日志已复制到剪贴板");
+    };
     modal.open();
 
     const append = (s) => {
@@ -104,13 +118,27 @@ module.exports = class FanqieDrafter extends Plugin {
     this.proc = proc;
     proc.stdout.on("data", (d) => append(d.toString("utf8")));
     proc.stderr.on("data", (d) => append(d.toString("utf8")));
+    // 硬超时兜底：kill 整棵进程树（Windows: taskkill /T），不再静默挂死
+    const timeoutMs = (this.settings.timeoutSec || 600) * 1000;
+    const timer = setTimeout(() => {
+      append("\n⏱ 硬超时触发，强制终止进程树…\n");
+      new Notice(`番茄上传超时（${this.settings.timeoutSec}s），已强制终止`);
+      if (process.platform === "win32" && proc.pid) {
+        try { spawn("taskkill", ["/pid", String(proc.pid), "/T", "/F"], { windowsHide: true }); } catch (e) {}
+      } else {
+        try { proc.kill(); } catch (e) {}
+      }
+    }, timeoutMs);
     proc.on("error", (e) => {
+      clearTimeout(timer);
       append(`\n进程启动失败：${e.message}\n请检查设置里的 Python 路径与 batch.py 路径。`);
-      new Notice("番茄上传：进程启动失败");
+      new Notice("番茄上传：进程启动失败（详见日志）");
     });
     proc.on("close", (code) => {
+      clearTimeout(timer);
       append(`\n—— 进程退出，code=${code} ——`);
       if (code === 0) new Notice("番茄上传完成");
+      else new Notice(`番茄上传失败（code=${code}）；点「复制日志」排查登录态/Playwright 问题`);
       try { fs.unlinkSync(this.tmpFile); } catch (e) {}
       this.tmpFile = null;
       this.proc = null;
@@ -145,6 +173,11 @@ class DrafterSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName("上传后回读校验 (--verify)").addToggle((t) =>
       t.setValue(this.plugin.settings.verify).onChange(async (v) => {
         this.plugin.settings.verify = v; await this.plugin.saveSettings();
+      }));
+    new Setting(containerEl).setName("进程硬超时（秒）").setDesc("超时强制终止整棵进程树（含 Playwright 浏览器），默认 600s，防静默挂死").addText((t) =>
+      t.setPlaceholder("600").setValue(String(this.plugin.settings.timeoutSec || 600)).onChange(async (v) => {
+        const n = parseInt(v, 10);
+        this.plugin.settings.timeoutSec = n >= 30 ? n : 600; await this.plugin.saveSettings();
       }));
   }
 }
